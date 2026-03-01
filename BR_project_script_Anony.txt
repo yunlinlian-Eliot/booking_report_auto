@@ -1,0 +1,155 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb 18 21:24:40 2026
+
+@author: Admin_01
+"""
+import pandas as pd
+from datetime import datetime
+import os
+
+# ==========================================================
+# INTERFACE: BUSINESS LOGIC & PARAMETERS
+# ==========================================================
+
+# 1. Branch Mapping (Input CSV Name -> Report Code)
+BRANCH_MAPPING = {
+    '*****': '***',
+    '*****': '***',
+    '*****': '***',
+    '*****': '***',
+    '*****': '***'
+}
+
+# 2. Time Slot Definitions Interface
+# Logic: Define start/end hours for different days
+def get_time_slot(dt):
+    """
+    Classifies a datetime object into AM or PM.
+    Returns None if the time is outside business hours or a Sunday.
+    """
+    if pd.isna(dt):
+        return None
+        
+    weekday = dt.strftime('%A')
+    hour = dt.hour
+    
+    if weekday == 'Sunday':
+        return None
+    
+    # SATURDAY: AM (X-Y), PM (Z-W)
+    if weekday == 'Saturday':
+        if X <= hour < Y: return 'AM'
+        if Z <= hour < W: return 'PM'
+        
+    # WEEKDAY: AM (A-B), PM (C-D)
+    else:
+        if A <= hour < B: return 'AM'
+        if C <= hour < D: return 'PM'
+    
+    return None
+
+# ==========================================================
+# CORE PROCESSING ENGINE
+# ==========================================================
+
+def generate_report(input_csv, output_xlsx):
+    # Load data
+    if not os.path.exists(input_csv):
+        print(f"Error: File '{input_csv}' not found.")
+        return
+
+    df = pd.read_csv(input_csv)
+    
+    # Clean Column Names (Removes trailing spaces like "Branch ")
+    df.columns = df.columns.str.strip()
+    
+    # Robust Date Parsing: specifically handles
+    # errors='coerce' will turn invalid formats into NaT instead of crashing
+    df['appointment_start_time'] = pd.to_datetime(df['appointment_start_time'], errors='coerce')
+    
+    # Debug: Check if dates are parsing correctly
+    print("--- Date Parsing Preview ---")
+    print(df[['appointment_start_time']].head())
+    
+    # Apply slot classification
+    df['Slot'] = df['appointment_start_time'].apply(get_time_slot)
+    
+    # Filter out invalid slots (Sundays, off-hours, or failed date parses)
+    original_count = len(df)
+    df = df[df['Slot'].notna()].copy()
+    print(f"Rows kept after AM/PM filtering: {len(df)} out of {original_count}")
+
+    if df.empty:
+        print("Error: No data remains after filtering. Please check your date formats or business hour logic.")
+        return
+
+    # Extract clean date and day of week
+    df['DATES'] = df['appointment_start_time'].dt.strftime('%Y-%m-%d')
+    df['DOW'] = df['appointment_start_time'].dt.strftime('%A')
+    df['Branch_Code'] = df['Branch'].map(BRANCH_MAPPING)
+    
+    # Pivot Table
+    pivot = df.pivot_table(
+        index=['DOW', 'DATES'],
+        columns=['Branch_Code', 'Slot'],
+        aggfunc='size',
+        fill_value=0
+    )
+   
+    # Construct final reporting table
+    branches = ['***', '***', '***', '***', '***']
+    final_rows = []
+    
+    # Sort unique dates to maintain chronological order
+    date_index = df[['DOW', 'DATES']].drop_duplicates().sort_values('DATES')
+    
+    for _, item in date_index.iterrows():
+        dow, d_str = item['DOW'], item['DATES']
+        
+        row_dict = {
+            ('DOW', ''): dow,
+            ('DATES', ''): d_str
+        }
+        
+        # Calculate Daily Totals
+        row_dict[('DAILY TOTALS', 'AM')] = sum(pivot.get((b, 'AM'), pd.Series(0)).get((dow, d_str), 0) for b in BRANCH_MAPPING.values())
+        row_dict[('DAILY TOTALS', 'PM')] = sum(pivot.get((b, 'PM'), pd.Series(0)).get((dow, d_str), 0) for b in BRANCH_MAPPING.values())
+        
+        # Populate Branch Data
+        for b in branches:
+            row_dict[(b, 'AM')] = pivot.get((b, 'AM'), pd.Series(0)).get((dow, d_str), 0)
+            row_dict[(b, 'PM')] = pivot.get((b, 'PM'), pd.Series(0)).get((dow, d_str), 0)
+            
+        final_rows.append(row_dict)
+    
+    report_df = pd.DataFrame(final_rows)
+    report_df.columns = pd.MultiIndex.from_tuples(report_df.columns)
+    
+    # Grand Total Row
+    numeric_cols = report_df.columns[2:]
+    grand_totals = report_df[numeric_cols].sum()
+    total_row = {('DOW', ''): 'Grand Total', ('DATES', ''): ''}
+    for col in numeric_cols:
+        total_row[col] = grand_totals[col]
+    
+    report_df = pd.concat([report_df, pd.DataFrame([total_row])], ignore_index=True)
+
+    # Set Index to allow MultiIndex export to Excel
+    report_df = report_df.set_index([('DOW', ''), ('DATES', '')])
+    report_df.index.names = ['DOW', 'DATES']
+
+    # EXPORT
+    with pd.ExcelWriter(output_xlsx, engine='openpyxl') as writer:
+        sheet_name = 'Forecast Report'
+        # Header Info
+        pd.DataFrame([['PREPARED BY STAFF:']]).to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=0)
+        pd.DataFrame([[f"APPT # BOOKED UPDATED: {datetime.now().strftime('%Y-%m-%d %H:%M')}"]]).to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=1)
+        
+        # Main Table
+        report_df.to_excel(writer, index=True, sheet_name=sheet_name, startrow=3)
+
+    print(f"Success! Report saved as: {os.path.abspath(output_xlsx)}")
+
+if __name__ == "__main__":
+    generate_report('input_BR.csv', 'output_BR.xlsx')
